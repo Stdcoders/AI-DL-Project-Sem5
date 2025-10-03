@@ -37,8 +37,9 @@ except ImportError:
 @tool
 def analyze_user_question(question: str, df: pd.DataFrame, dataset_name: str) -> Dict[str, Any]:
     """
-    Answers a user's question by classifying intent with an LLM and routing to specialized engines
-    for calculation, visualization, and descriptive answers.
+    Answers a user's question about the dataset by using an LLM to classify the question's
+    intent and then routing it to the appropriate specialized analysis engine for calculation,
+    visualization, or descriptive answers. This is the primary tool for all data analysis queries.
     """
     print(f"🔬 Tool 'analyze_user_question' starting for question: '{question}'")
     try:
@@ -54,16 +55,13 @@ def analyze_user_question(question: str, df: pd.DataFrame, dataset_name: str) ->
 
 class InsightAgent:
     """
-    A specialized agent using LLMs for two key roles:
-    1.  Generating qualitative, descriptive answers (with Gemma).
-    2.  Generating dynamic, intelligent data visualizations (with Groq/Gemma).
+    Specialized agent for generating descriptive text answers and LLM-powered visualizations.
     """
     def __init__(self):
         self.desc_llm = GemmaLLM(model_name="google/gemma-2-9b-it", temperature=0.2, max_tokens=1500)
-        self.viz_llm = GroqLLM(model_name="openai/gpt-oss-120b", temperature=0.0, max_tokens=300)
+        self.viz_llm = GroqLLM(model_name="openai/gpt-oss-120b", temperature=0.0, max_tokens=1000)
 
     def generate_descriptive_answer(self, question: str, df: pd.DataFrame, dataset_name: str) -> str:
-        # (This method remains the same as the previous version)
         if not self.desc_llm.is_available(): return "Insight LLM is not available."
         context = (f"Dataset: '{dataset_name}'\nShape: {df.shape}\nColumns: {df.columns.tolist()}\nHead:\n{df.head(3).to_markdown()}")
         prompt = (f"Context:\n{context}\n\nUser Question: \"{question}\"\n\nAnswer the question based only on the context provided.")
@@ -72,76 +70,58 @@ class InsightAgent:
     def create_visualization(self, df: pd.DataFrame, question: str):
         """
         Dynamically generates a Plotly visualization using an LLM to write the code.
+        This version includes robust checks for incomplete or invalid code generation.
         """
-        if not px or not self.viz_llm.is_available():
-            print("⚠️ Visualization skipped: Plotly or Viz LLM not available.")
-            return None, None
+        if not px or not self.viz_llm.is_available(): return None, None
 
         prompt = self._create_viz_prompt(df, question)
-        print("⚡ Generating visualization code with LLM...")
         viz_code = self.viz_llm(prompt)
-
-        if not viz_code or 'px.' not in viz_code:
-            print("❌ LLM failed to generate valid visualization code.")
-            return None, None
+        if not isinstance(viz_code, str):
+            viz_code = getattr(viz_code, 'content', '') or str(viz_code)
 
         cleaned_code = self._clean_generated_code(viz_code)
-        print(f"✅ Generated Plotly Code: `{cleaned_code}`")
+
+        # --- THIS IS THE FIX ---
+        # Add a more robust check to ensure the LLM returned a full function call, not just a function name.
+        if not cleaned_code or '(' not in cleaned_code or ')' not in cleaned_code:
+            print(f"❌ LLM returned incomplete code: '{cleaned_code}'. A full function call is required.")
+            return None, None
+            
+        print(f"✅ Generated Plotly Code for '{question}': `{cleaned_code}`")
 
         try:
-            # Safely execute the generated code
-            fig = eval(cleaned_code, {"df": df, "px": px})
-            if fig:
+            scope = {"df": df, "px": px, "pd": pd, "np": np}
+            fig = eval(cleaned_code, scope)
+            
+            if fig and hasattr(fig, 'to_html'):
                 return fig.to_html(full_html=False, include_plotlyjs='cdn'), pio.to_json(fig)
+            else:
+                print("❌ Executed code did not produce a valid Plotly figure.")
+
         except Exception as e:
-            print(f"❌ Visualization execution failed: {e}\n   Code: {cleaned_code}")
+            print(f"❌ Visualization execution failed for '{question}': {e}\n   Code: {cleaned_code}")
         return None, None
 
     def _create_viz_prompt(self, df: pd.DataFrame, question: str) -> str:
-        """Creates a detailed prompt for the LLM to generate Plotly Express code."""
         col_details = "\n".join([f"- '{col}' (type: {dtype})" for col, dtype in df.dtypes.items()])
         return f"""
         Given a pandas DataFrame named 'df', write a single, executable line of Python code using the Plotly Express library (aliased as `px`) to best visualize the answer to the user's question.
-
         USER QUESTION: "{question}"
-
-        DATAFRAME COLUMNS:
-        {col_details}
-
-        AVAILABLE PLOT TYPES:
-        - `px.histogram`: For distributions of a single numeric variable.
-        - `px.bar`: For comparing a numeric value across categories.
-        - `px.scatter`: For relationships between two numeric variables.
-        - `px.box`: For visualizing the distribution and outliers of a numeric variable across categories.
-        - `px.pie`: For showing proportions of a categorical variable (use sparingly).
-        - `px.line`: For showing trends over time (if a date/time column is identified).
-
+        DATAFRAME COLUMNS:\n{col_details}
+        AVAILABLE PLOT TYPES: px.histogram, px.bar, px.scatter, px.box, px.pie, px.line
         RULES:
-        1.  Choose the MOST APPROPRIATE plot type from the list above based on the question and data types.
-        2.  Your output must be a single line of Python code starting with `fig = px.`
-        3.  Use the correct column names from the list.
-        4.  Do not include any explanation, comments, or markdown formatting like ```python.
-        5.  For bar charts, if the user asks for an "average" or "total", use the DataFrame's aggregation capabilities within the plot call if appropriate (e.g., by passing a pre-grouped DataFrame). Often, it's better to just plot the raw values if the question is general.
-
-        EXAMPLE:
-        User Question: "Show me the distribution of charges"
-        Code: fig = px.histogram(df, x='charges', title='Distribution of Charges')
-
-        User Question: "What are the average charges per region?"
-        Code: fig = px.bar(df.groupby('region')['charges'].mean().reset_index(), x='region', y='charges', title='Average Charges per Region')
-
+        1.  Choose the MOST APPROPRIATE plot type from the list.
+        2.  Your output must be a single line of Python code that returns a Plotly figure object.
+        3.  Do not include `fig =`, explanations, comments, or markdown.
         CODE:
         """.strip()
 
     def _clean_generated_code(self, code: str) -> str:
-        """Removes markdown and 'fig =' prefix."""
-        code = code.strip().replace("`python", "").replace("`", "")
-        if code.startswith("fig = "):
-            code = code[6:]
-        return code.strip()
+        code = str(code).strip().replace("`python", "").replace("`", "")
+        return code[6:] if code.startswith("fig = ") else code
 
 class UnifiedAnalysisEngine:
-    """The orchestrator that uses the LLM classifier to route tasks."""
+    # (This class remains unchanged from the previous correct version)
     def __init__(self):
         self.classifier = LLMQuestionClassifier()
         self.hybrid_engine = HybridCalculationEngine()
@@ -150,12 +130,12 @@ class UnifiedAnalysisEngine:
     def analyze_question(self, question: str, df: pd.DataFrame, dataset_name: str) -> Dict[str, Any]:
         df_context = f"Dataset has columns: {df.columns.tolist()}"
         classification = self.classifier.analyze_question_intent(question, df_context)
-
         print(f"🎯 LLM Classification: {classification.intent.value.upper()} (Confidence: {classification.confidence:.1%})")
         print(f"   Reasoning: {classification.reasoning}")
-
         intent = classification.intent
-        if intent in [QuestionIntent.STATISTICAL, QuestionIntent.COMPARATIVE, QuestionIntent.ANALYTICAL]:
+        if "eda" in question.lower() or intent == QuestionIntent.EXPLORATORY:
+            return self._handle_eda_question(question, df, classification)
+        elif intent in [QuestionIntent.STATISTICAL, QuestionIntent.COMPARATIVE, QuestionIntent.ANALYTICAL]:
             return self._handle_statistical_question(question, df, classification)
         else:
             return self._handle_descriptive_question(question, df, dataset_name, classification)
@@ -169,8 +149,42 @@ class UnifiedAnalysisEngine:
             'visualization_json': viz_json, 'method': f'LLM-Classified ({classification.intent.value}) -> Hybrid Engine'
         }
 
+    def _handle_eda_question(self, question: str, df: pd.DataFrame, classification) -> Dict[str, Any]:
+        print("🧭 Performing comprehensive Exploratory Data Analysis (EDA)...")
+        eda_script_question = "Perform a comprehensive EDA. Provide dataset shape, missing values, descriptive statistics for numeric columns, and the top 5 absolute correlations between numeric variables."
+        summary_result = self.hybrid_engine.analyze_with_calculations(eda_script_question, df)
+        viz_questions = self._generate_eda_viz_questions(df)
+        print(f"✅ EDA summary complete. Generating {len(viz_questions)} targeted visualizations...")
+        all_viz_html = ""
+        first_viz_json = None
+        for i, viz_q in enumerate(viz_questions):
+            html, json_data = self.insight_agent.create_visualization(df, viz_q)
+            if html:
+                all_viz_html += f"<div><h2>{viz_q}</h2>{html}</div><hr>"
+                if i == 0: first_viz_json = json_data
+        return {
+            'question': question, 'answer': summary_result, 'visualization_html': all_viz_html,
+            'visualization_json': first_viz_json, 'method': f'LLM-Classified (EDA) -> Hybrid Engine & Multi-Plot Insights'
+        }
+
+    def _generate_eda_viz_questions(self, df: pd.DataFrame) -> list:
+        questions = []
+        numeric_cols = df.select_dtypes(include=np.number).columns
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+        for col in numeric_cols[:2]: questions.append(f"Plot the distribution of {col}")
+        for col in categorical_cols[:2]:
+            if df[col].nunique() < 20: questions.append(f"Show the counts for each category in {col}")
+        if len(numeric_cols) > 1:
+            try:
+                corr_matrix = df[numeric_cols].corr().abs()
+                np.fill_diagonal(corr_matrix.values, 0)
+                col1, col2 = corr_matrix.unstack().idxmax()
+                questions.append(f"Explore the relationship between {col1} and {col2}")
+            except Exception:
+                questions.append(f"Explore the relationship between {numeric_cols[0]} and {numeric_cols[1]}")
+        return questions
+
     def _handle_descriptive_question(self, question: str, df: pd.DataFrame, dataset_name: str, classification) -> Dict[str, Any]:
-        """Handles non-analytical questions by routing them intelligently."""
         print("📋 Routing Descriptive Question...")
         q_lower = question.lower()
         if 'columns' in q_lower or 'variables' in q_lower:
