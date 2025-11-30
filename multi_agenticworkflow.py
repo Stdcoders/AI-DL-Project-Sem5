@@ -85,19 +85,22 @@ def data_janitor_node(state: AgentState):
     df = state['dataframe']
     dataset_name = state['dataset_name']
 
-    # --- FIX IS HERE ---
-    # The tool returns a dictionary, so we must access the results by key.
+    # Call the cleaning tool
     cleaning_result = clean_and_analyze_data.invoke({
         "df": df,
         "dataset_name": dataset_name
     })
-    
-    # Get the cleaned DataFrame from the result dictionary
-    cleaned_dataframe = cleaning_result["cleaned_dataframe"]
-    
-    print("---Data Janitor: Cleaning complete.---")
+
+    # Extract cleaned dataframe and preview
+    cleaned_dataframe = cleaning_result.get("cleaned_dataframe", df)
+    sample_preview = cleaning_result.get("sample_preview", [])
+
+    print("\n✅ --- Data Janitor: Cleaning complete. ---")
+    print(f"📊 Cleaned dataset shape: {cleaned_dataframe.shape}")
+
+    # Return updated state
     return {
-        "dataframe": cleaned_dataframe, # Pass the actual DataFrame object
+        "dataframe": cleaned_dataframe,  # cleaned DataFrame object
         "is_cleaned": True
     }
 
