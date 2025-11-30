@@ -11,6 +11,9 @@ from tools.data_cleaning_tools import clean_and_analyze_data
 from tools.data_exploration_tools import understand_data, generate_questions
 from tools.analysis_tools import analyze_user_question
 from tools.reporting_tools import generate_comprehensive_report
+from tools.critique_tools import critique_analysis
+from tools.improvement_tools import improve_analysis
+
 import os
 import re
 from datetime import datetime
@@ -159,6 +162,56 @@ def insight_analyst_node(state: AgentState):
         
     return {"analysis_history": history}
 
+def critic_node(state: AgentState):
+    """Evaluates and improves the analyst's output if needed."""
+    print("---AGENT: Critic Node---")
+
+    history = state.get("analysis_history", [])
+    if not history:
+        print("No analysis found to critique.")
+        return {}
+
+    last_analysis = history[-1]
+    user_question = state.get("user_request", "")
+    original_answer = last_analysis.get("answer", "")
+
+    # --- RUN CRITIQUE TOOL ---
+    critique_result = critique_analysis.invoke({
+        "user_question": user_question,
+        "analysis_response": last_analysis
+    })
+
+    score = critique_result.get("score", 0)
+    critique_text = critique_result.get("critique", "")
+
+    last_analysis["critique"] = critique_result  # store critique
+
+    print(f"Critique Score: {score}")
+    print(f"Critique: {critique_text}")
+
+    # --- IF SCORE < 7 → IMPROVE ANSWER ---
+    if score < 7:
+        print("⚠️ Critique score low — improving answer using LLM...")
+
+        improved = improve_analysis.invoke({
+            "user_question": user_question,
+            "original_answer": original_answer,
+            "critique": critique_text
+        })
+
+        improved_answer = improved.get("improved_answer", original_answer)
+
+        # Replace the answer inside last analysis
+        last_analysis["answer"] = improved_answer
+
+        print("\n---IMPROVED ANSWER GENERATED---")
+        print(improved_answer)
+
+    else:
+        print("✔️ Answer quality is good — no refinement needed.")
+
+    return {"analysis_history": history}
+
 def report_writer_node(state: AgentState):
     """Agent node for generating the final PDF report."""
     print("---AGENT: Report Writer---")
@@ -224,6 +277,7 @@ workflow.add_node("data_janitor", data_janitor_node)
 workflow.add_node("data_explorer", data_explorer_node)
 workflow.add_node("insight_analyst", insight_analyst_node)
 workflow.add_node("report_writer", report_writer_node)
+workflow.add_node("critic", critic_node)
 # workflow.add_node("planner_router", planner_router)
 
 # The entry point is the router
@@ -235,6 +289,7 @@ workflow.set_conditional_entry_point(
         "data_janitor": "data_janitor",
         "data_explorer": "data_explorer",
         "insight_analyst": "insight_analyst",
+         "critic": "critic",
         "report_writer": "report_writer",
         "__end__": END
     }
@@ -243,9 +298,13 @@ workflow.set_conditional_entry_point(
 # Define the workflow path after each agent completes its task
 workflow.add_edge("data_steward", "data_janitor")
 workflow.add_edge("data_janitor", "data_explorer")
-workflow.add_edge("data_explorer", END) # Stop and wait for user question
-workflow.add_edge("insight_analyst", END) # Stop and wait for next command
-workflow.add_edge("report_writer", END) # Stop after generating report
+workflow.add_edge("data_explorer", END)  # Stop and wait for user question
+
+# Analysis → Critique → End
+workflow.add_edge("insight_analyst", "critic")
+workflow.add_edge("critic", END)
+
+workflow.add_edge("report_writer", END)  # Stop after generating report
 
 # Compile the graph into a runnable application
 app = workflow.compile()
