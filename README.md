@@ -8,7 +8,7 @@ It integrates LLM-driven semantic reasoning, deterministic statistical engines, 
 
 A coordinated pipeline of specialized agents:
 
-Data Steward — Multi-format data ingestion (CSV, Excel, JSON, PDF, text).
+Data Steward — Multi-format data ingestion (CSV, Excel, JSON, Text).
 
 Data Janitor — Intelligent data cleaning using LLM-guided strategies.
 
